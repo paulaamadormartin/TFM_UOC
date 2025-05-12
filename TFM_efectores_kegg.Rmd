@@ -1,0 +1,145 @@
+---
+title: "TFM_efectores_KEGG"
+author: "Paula Amador"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+```
+
+# Conseguir los nodos efectores que están en Hipathia
+
+Hipathia es un método que calcula la transducción de señal en dos pasos. Primero, cuantifica la presencia de un gen específico como un valor normalizado entre 0 y 1. Luego, calcula el valor de la señal que pasa por un nodo teniendo en cuenta el nivel de expresión de cada gen dentro del nodo y la intensidad de la señal que le llega. El valor de señal de la vía corresponde al valor de señal que atraviesa el último nodo de dicha vía.
+
+La señal llega a un nodo inicial y se transmite a lo largo de la vía siguiendo la dirección de las interacciones hasta llegar a un nodo de salida. De este modo, la señal puede seguir múltiples trayectorias dentro de la misma vía. Hipathia calcula la intensidad de esta señal por separado para cada nodo de salida de una vía.
+
+Los genes en los nodos de salida también se conocen como proteínas efectoras, ya que son las responsables de llevar a cabo la acción que la señal pretende provocar. Definimos una subvía efectora que termina en el nodo G como el subgrafo que incluye todos los nodos que forman parte de alguna trayectoria que conduce a G. Cuando se aplica a subvías efectoras, hipathia devuelve la intensidad de la señal que llega a la proteína efectora G.
+
+Las subvías efectoras pueden tener múltiples nodos de entrada. Para analizar en detalle cuál de las posibles trayectorias que conducen al nodo G es responsable del cambio observado, las subvías efectoras pueden descomponerse en varias subvías que incluyan solo un nodo de entrada. Definimos la subvía descompuesta desde H hasta G como el subgrafo que incluye todos los nodos que forman parte de alguna trayectoria desde H hasta G.
+
+## Cargar librerias y datos
+
+```{r}
+library("hipathia")
+pathways=hipathia::load_pathways(species = "hsa")
+```
+
+## Nombre de las rutas
+Creamos una función que acceda a cada elemento de la lista pathigraphs (que representa una ruta especifica de señalización por ejemplo,hsa03320) y nos devuelva el nombre de la ruta
+```{r}
+all_path_names=sapply(pathways$pathigraphs, function(x) x$path.name)
+# sapply aplica una función a cada elemento de una lista
+# la función toma un solo argumento x 
+# x$path.name accede al nombre de la ruta 
+```
+
+## Explorar una ruta específica: hsa03320
+
+```{r}
+all_path_names["hsa03320"] #para ver el nombre de esta ruta
+pathways$pathigraphs$hsa03320$subgraphs %>% length() #Cada subgrafo representa una posible trayectoria completa desde un nodo de entrada hasta uno de salida.
+pathways$pathigraphs$hsa03320$effector.subgraphs %>% length() #hay menos nodos efectores
+
+```
+
+##  Explorar un subgrafo de un efector específico
+```{r}
+pathways$pathigraphs$hsa03320$effector.subgraphs$`P-hsa03320-37` %>% class
+pathways$pathigraphs$hsa03320$effector.subgraphs$`P-hsa03320-37` %>% plot 
+pathways$pathigraphs$hsa03320$effector.subgraphs$`P-hsa03320-37` %>%  V() #devuelve los vértices (nodos) del grafo, que representan genes/proteínas
+
+
+```
+
+## Extraer los genes efectores
+```{r}
+subG=pathways$pathigraphs$hsa03320$effector.subgraphs$`P-hsa03320-37`#trayectoria desde un nodo de entrada a uno efector
+V(subG)[degree(subG, mode = "out")==0]$genesList
+#se accede a todos los nodos y se selecciona los nodos que cumple la condición de que sean terminales (no tenga nodos posteriores)
+#genesList devuelve los genes asociados al nodo efector de esta subvía
+```
+
+Se convierte a un dataframe para visualizar todos los nodos (vértices)
+```{r}
+igraph::as_data_frame(subG, what = "vertices") %>% View
+```
+
+## Función para extraer los nodos efectores de cada subgrafo
+```{r}
+get_entrez_effector=function(subG){
+   V(subG)[degree(subG, mode = "out")==0]$genesList %>% unlist()  
+}
+#ejemplo
+get_entrez_effector(pathways$pathigraphs$hsa03460$effector.subgraphs$`P-hsa03460-28`)
+```
+Nos devuelve el ID del gen efector 
+
+
+```{r}
+get_all_effector_genes= function(pathways) {
+  # Usamos sapply para recorrer las vías y las subvías efectoras
+  all_genes = sapply(pathways$pathigraphs, function(pw) {
+    # Extraemos genes de cada subvía efectora dentro de cada vía
+    sapply(pw$effector.subgraphs, function(subG) {
+      # Llamamos a la función auxiliar para obtener los genes de cada subvía
+      genes= get_entrez_effector(subG)
+      return(genes)
+    })
+  })
+  
+  # Convertimos la lista resultante a un vector plano y quitamos duplicados
+  all_genes=unique(unlist(all_genes))
+  
+  return(all_genes)
+}
+```
+
+
+```{r}
+all_effector_genes=get_all_effector_genes(pathways)
+length(all_effector_genes)  # Cuántos genes hay
+head(all_effector_genes)    # Primeros genes
+```
+```{r}
+library(org.Hs.eg.db)
+
+# Traducir IDs Entrez a nombres de genes
+genes_info=AnnotationDbi::select(org.Hs.eg.db,
+                                    keys = all_effector_genes,
+                                    columns = c("SYMBOL", "GENENAME"),
+                                    keytype = "ENTREZID")
+
+head(genes_info)  # Muestra los primeros resultados
+
+```
+
+```{r}
+# Función para buscar genes en la lista de genes efectores
+search_multiple_genes=function(genes_info, search_terms) {
+  
+  # Filtrar los genes que están en la lista
+  gene_info= genes_info[genes_info$SYMBOL %in% search_terms, ]
+  
+  # Si hay genes encontrados, devolver la información
+  if (nrow(gene_info) > 0) {
+    return(gene_info)  # Devuelve el data.frame con los genes encontrados y sus IDs Entrez
+  } else {
+    return("Ninguno de los genes solicitados está en la lista de genes efectores.")
+  }
+}
+
+
+# Lista de genes a buscar
+genes_to_search= c("STAT3", "SMAD2", "MTOR", "MAPK8", "NFKBIA", "MAPK1", "JUN", "AKT1", "MAP2K7")
+
+result_multiple= search_multiple_genes(genes_info, genes_to_search)
+print(result_multiple)
+
+
+
+```
+
